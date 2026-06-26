@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   GitBranch, 
   GitCommit, 
@@ -8,30 +8,23 @@ import {
   Plus, 
   Play, 
   Check, 
-  Copy, 
   FileText, 
   GitCompare, 
   History, 
   Globe, 
-  Lock, 
-  Tag, 
   Terminal, 
   Layers,
   ChevronRight,
-  Flame,
-  ArrowLeft,
-  X,
-  ExternalLink,
-  ChevronDown
+  X
 } from 'lucide-react';
 import styles from './page.module.css';
-import { MockDb, Collection, Prompt, Commit, Tag as TagType, ModelConfig } from '@/lib/mockDb';
+import { Collection, Prompt, Commit, Tag as TagType, ModelConfig } from '@/lib/mockDb'; // Reuse TypeScript interfaces
 import { computeLineDiff } from '@/lib/diff';
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
 
-  // Database states
+  // Relational API states
   const [collections, setCollections] = useState<Collection[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [commits, setCommits] = useState<Commit[]>([]);
@@ -87,19 +80,88 @@ export default function Home() {
 
   // Clipboard copy feedback states
   const [copyCodeText, setCopyCodeText] = useState<string>('Copy SDK Code');
-  const [copyOutputText, setCopyOutputText] = useState<string>('Copy Output');
 
-  // Load database on mount
-  useEffect(() => {
-    setCollections(MockDb.getCollections());
-    const initialPrompts = MockDb.getPrompts();
-    setPrompts(initialPrompts);
-    setCommits(MockDb.getCommits());
-    setTags(MockDb.getTags());
+  // Fetch full data relation tree from API
+  const fetchAllData = async (selectPromptId?: string) => {
+    try {
+      const res = await fetch('/api/collections');
+      const cols = await res.json();
+      if (!Array.isArray(cols)) return;
 
-    if (initialPrompts.length > 0) {
-      setSelectedPromptId(initialPrompts[0].id);
+      setCollections(cols);
+
+      // Reshape relational payload into clean flat array states for UI controls
+      const allPrompts: Prompt[] = [];
+      const allCommits: Commit[] = [];
+      const allTags: TagType[] = [];
+
+      cols.forEach((col: any) => {
+        if (!col.prompts) return;
+        col.prompts.forEach((p: any) => {
+          allPrompts.push({
+            id: p.id,
+            collectionId: p.collectionId,
+            creatorId: 'user-1',
+            name: p.name,
+            slug: p.slug,
+            forkedFromId: p.forkedFromId,
+            isPublic: p.isPublic,
+            createdAt: p.createdAt
+          });
+
+          if (p.commits) {
+            p.commits.forEach((c: any) => {
+              allCommits.push({
+                id: c.id,
+                promptId: c.promptId,
+                parentCommitId: c.parentCommitId,
+                authorName: c.authorName,
+                commitHash: c.commitHash,
+                template: c.template,
+                modelConfig: {
+                  provider: c.provider as 'openai' | 'anthropic',
+                  modelName: c.modelName,
+                  temperature: c.temperature,
+                  maxTokens: c.maxTokens,
+                  topP: c.topP
+                },
+                commitMessage: c.commitMessage,
+                createdAt: c.createdAt
+              });
+            });
+          }
+
+          if (p.tags) {
+            p.tags.forEach((t: any) => {
+              allTags.push({
+                id: t.id,
+                promptId: t.promptId,
+                commitId: t.commitId,
+                name: t.name,
+                updatedAt: t.updatedAt
+              });
+            });
+          }
+        });
+      });
+
+      setPrompts(allPrompts);
+      setCommits(allCommits);
+      setTags(allTags);
+
+      if (selectPromptId) {
+        setSelectedPromptId(selectPromptId);
+      } else if (allPrompts.length > 0 && !selectedPromptId) {
+        setSelectedPromptId(allPrompts[0].id);
+      }
+    } catch (err) {
+      console.error('Error fetching backend workspace details:', err);
     }
+  };
+
+  // Load backend details on mount
+  useEffect(() => {
+    fetchAllData();
     setMounted(true);
   }, []);
 
@@ -108,23 +170,28 @@ export default function Home() {
     return prompts.find(p => p.id === selectedPromptId) || null;
   }, [prompts, selectedPromptId]);
 
+  const activePromptHistory = useMemo(() => {
+    if (!selectedPromptId) return [];
+    return commits
+      .filter(c => c.promptId === selectedPromptId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [commits, selectedPromptId]);
+
   const activeLatestCommit = useMemo(() => {
-    if (!selectedPromptId) return null;
-    return MockDb.getLatestCommit(selectedPromptId);
-  }, [selectedPromptId, commits]);
+    return activePromptHistory.length > 0 ? activePromptHistory[0] : null;
+  }, [activePromptHistory]);
 
   useEffect(() => {
     if (activeLatestCommit) {
       setEditorText(activeLatestCommit.template);
       setModelConfig(activeLatestCommit.modelConfig);
-      // Initialize default compare selection for diff view
-      const promptCommits = MockDb.getPromptHistory(selectedPromptId);
-      if (promptCommits.length > 0) {
-        setDiffCompareCommitId(promptCommits[0].id); // Latest
-        setDiffBaseCommitId(promptCommits[promptCommits.length - 1].id); // Root
+      
+      if (activePromptHistory.length > 0) {
+        setDiffCompareCommitId(activePromptHistory[0].id);
+        setDiffBaseCommitId(activePromptHistory[activePromptHistory.length - 1].id);
       }
     }
-  }, [selectedPromptId, activeLatestCommit]);
+  }, [selectedPromptId, activeLatestCommit, activePromptHistory]);
 
   // Extract variables dynamically from prompt template body
   const parsedVariables = useMemo(() => {
@@ -155,60 +222,126 @@ export default function Home() {
 
   const currentWorkspaceName = "Personal Workspace";
 
-  // Actions handlers
-  const handleCreateCollection = (e: React.FormEvent) => {
+  // Actions handlers via APIs
+  const handleCreateCollection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newColName.trim()) return;
-    const newCol = MockDb.createCollection(newColName, newColDesc, newColPublic);
-    setCollections(MockDb.getCollections());
-    setIsColModalOpen(false);
-    setNewColName('');
-    setNewColDesc('');
-    setNewColPublic(false);
+
+    try {
+      const res = await fetch('/api/collections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newColName,
+          description: newColDesc,
+          isPublic: newColPublic
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchAllData();
+      setIsColModalOpen(false);
+      setNewColName('');
+      setNewColDesc('');
+      setNewColPublic(false);
+    } catch (err: any) {
+      alert(err.message || 'Error creating collection');
+    }
   };
 
-  const handleCreatePrompt = (e: React.FormEvent) => {
+  const handleCreatePrompt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPromptName.trim() || !targetColIdForPrompt) return;
-    const { prompt } = MockDb.createPrompt(targetColIdForPrompt, newPromptName, newPromptPublic);
-    setPrompts(MockDb.getPrompts());
-    setCommits(MockDb.getCommits());
-    setSelectedPromptId(prompt.id);
-    setActiveTab('editor');
-    setIsPromptModalOpen(false);
-    setNewPromptName('');
-    setNewPromptPublic(false);
+
+    try {
+      const res = await fetch('/api/prompts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          collectionId: targetColIdForPrompt,
+          name: newPromptName,
+          isPublic: newPromptPublic
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchAllData(data.prompt.id);
+      setIsPromptModalOpen(false);
+      setNewPromptName('');
+      setNewPromptPublic(false);
+    } catch (err: any) {
+      alert(err.message || 'Error creating prompt');
+    }
   };
 
-  const handleSaveCommit = (e: React.FormEvent) => {
+  const handleSaveCommit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPromptId || !commitMessage.trim()) return;
-    MockDb.createCommit(
-      selectedPromptId,
-      editorText,
-      modelConfig,
-      commitMessage,
-      activeLatestCommit?.id || null
-    );
-    setCommits(MockDb.getCommits());
-    setCommitMessage('');
-    setIsCommitModalOpen(false);
+
+    try {
+      const res = await fetch(`/api/prompts/${selectedPromptId}/commits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          template: editorText,
+          modelConfig,
+          commitMessage,
+          parentCommitId: activeLatestCommit?.id || null
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchAllData(selectedPromptId);
+      setCommitMessage('');
+      setIsCommitModalOpen(false);
+    } catch (err: any) {
+      alert(err.message || 'Error committing version');
+    }
   };
 
-  const handleForkPrompt = (e: React.FormEvent) => {
+  const handleForkPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedPromptId || !targetColIdForFork) return;
-    const forked = MockDb.forkPrompt(selectedPromptId, targetColIdForFork);
-    setPrompts(MockDb.getPrompts());
-    setCommits(MockDb.getCommits());
-    setSelectedPromptId(forked.id);
-    setActiveTab('editor');
-    setIsForkModalOpen(false);
+
+    try {
+      const res = await fetch(`/api/prompts/${selectedPromptId}/fork`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetCollectionId: targetColIdForFork
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchAllData(data.prompt.id);
+      setIsForkModalOpen(false);
+    } catch (err: any) {
+      alert(err.message || 'Error forking prompt');
+    }
   };
 
-  const handleSetTag = (tagName: string, commitId: string) => {
-    MockDb.setTag(selectedPromptId, commitId, tagName);
-    setTags(MockDb.getTags());
+  const handleSetTag = async (tagName: string, commitId: string) => {
+    try {
+      const res = await fetch('/api/tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          promptId: selectedPromptId,
+          commitId,
+          name: tagName
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      await fetchAllData(selectedPromptId);
+    } catch (err: any) {
+      alert(err.message || 'Error deploying tag');
+    }
   };
 
   // Mock Streaming Playground Execution
@@ -218,13 +351,12 @@ export default function Home() {
     setStreamingOutput('');
     setRunStats(null);
 
-    // Substitute variables in the template for a mock processing display
     let processedPrompt = editorText;
     parsedVariables.forEach(v => {
       processedPrompt = processedPrompt.replace(new RegExp(`\\{\\{\\s*${v}\\s*\\}\\}`, 'g'), variables[v] || `[${v}]`);
     });
 
-    const mockOutputResponse = `[Playground Execution Sandbox]
+    const mockOutputResponse = `[Playground SQLite Sandbox]
 Model Engine: ${modelConfig.provider === 'openai' ? 'OpenAI GPT-4o' : 'Anthropic Claude 3.5 Sonnet'}
 Temperature: ${modelConfig.temperature}
 Active Settings: MaxTokens=${modelConfig.maxTokens}, TopP=${modelConfig.topP}
@@ -258,7 +390,7 @@ Testing output streaming complete. Let me know if you would like to commit this 
           latency: 280
         });
       }
-    }, 45); // fast visual typing simulation
+    }, 45);
   };
 
   // Visual Diff View Generator
@@ -299,7 +431,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
             <span style={{ fontWeight: 500, fontSize: '12px' }}>{currentWorkspaceName}</span>
           </div>
 
-          {/* Controls to trigger Modals */}
           <div className={styles.sectionHeader}>
             <span>Collections</span>
             <button 
@@ -345,8 +476,7 @@ Testing output streaming complete. Let me know if you would like to commit this 
                           className={`${styles.navItem} ${isActive ? styles.navItemActive : ''}`}
                           onClick={() => {
                             setSelectedPromptId(p.id);
-                            // default history selection
-                            const ph = MockDb.getPromptHistory(p.id);
+                            const ph = commits.filter(c => c.promptId === p.id);
                             if (ph.length > 0) setSelectedHistoryCommitId(ph[0].id);
                           }}
                         >
@@ -402,7 +532,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
               <ChevronRight size={13} style={{ color: 'var(--text-muted)' }} />
               <span className={styles.crumbActive}>{activePrompt.name}</span>
               
-              {/* Show production/staging tag badges */}
               {activePromptTags.map(t => (
                 <span 
                   key={t.id} 
@@ -455,8 +584,7 @@ Testing output streaming complete. Let me know if you would like to commit this 
               className={`${styles.tab} ${activeTab === 'history' ? styles.tabActive : ''}`}
               onClick={() => {
                 setActiveTab('history');
-                const ph = MockDb.getPromptHistory(selectedPromptId);
-                if (ph.length > 0) setSelectedHistoryCommitId(ph[0].id);
+                if (activePromptHistory.length > 0) setSelectedHistoryCommitId(activePromptHistory[0].id);
               }}
             >
               <History size={14} style={{ display: 'inline', marginRight: '6px', verticalAlign: 'text-top' }} />
@@ -475,7 +603,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
           {activeTab === 'editor' && (
             <div style={{ display: 'flex', flex: 1, flexDirection: 'column', overflow: 'hidden' }}>
               <div className={styles.panelContainer}>
-                {/* Text Area Prompt Editor */}
                 <div className={styles.editorPanel}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div className={styles.editorLabel}>Prompt Template Instructions</div>
@@ -490,7 +617,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
                     placeholder="Write system instructions here... e.g. You are a helpful assistant. Translate {{text}} to {{language}}."
                   />
 
-                  {/* Variables pills preview */}
                   <div className={styles.variableBanner}>
                     {parsedVariables.map(v => (
                       <span key={v} className={styles.varPill}>
@@ -505,7 +631,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
                   </div>
                 </div>
 
-                {/* Playground Configuration Right Sidebar */}
                 <div className={styles.playgroundPanel}>
                   <div className={styles.editorLabel}>Playground Settings</div>
 
@@ -584,7 +709,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
                 </div>
               </div>
 
-              {/* Bottom Console Drawer */}
               <div className={styles.consoleDrawer}>
                 <div className={styles.consoleHeader}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -613,7 +737,7 @@ Testing output streaming complete. Let me know if you would like to commit this 
           {activeTab === 'history' && (
             <div className={styles.historyView}>
               <div className={styles.timeline}>
-                {MockDb.getPromptHistory(selectedPromptId).map((commit, idx) => {
+                {activePromptHistory.map((commit) => {
                   const isSelected = commit.id === selectedHistoryCommitId;
                   const commitTags = tags.filter(t => t.commitId === commit.id);
                   return (
@@ -766,16 +890,14 @@ Testing output streaming complete. Let me know if you would like to commit this 
                 </select>
               </div>
 
-              {/* Side by side diff grids */}
               <div className={styles.diffGrid}>
-                {/* Left side (Old text / Base) */}
                 <div className={styles.diffColumn}>
                   <div className={styles.diffColumnHeader}>
                     {commits.find(c => c.id === diffBaseCommitId)?.commitMessage} ({commits.find(c => c.id === diffBaseCommitId)?.commitHash})
                   </div>
                   <div className={styles.diffContent}>
                     {diffLines.map((line, idx) => {
-                      if (line.type === 'added') return null; // hide added lines on base side
+                      if (line.type === 'added') return null;
                       return (
                         <span 
                           key={idx} 
@@ -788,14 +910,13 @@ Testing output streaming complete. Let me know if you would like to commit this 
                   </div>
                 </div>
 
-                {/* Right side (New text / Compare) */}
                 <div className={styles.diffColumn}>
                   <div className={styles.diffColumnHeader}>
                     {commits.find(c => c.id === diffCompareCommitId)?.commitMessage} ({commits.find(c => c.id === diffCompareCommitId)?.commitHash})
                   </div>
                   <div className={styles.diffContent}>
                     {diffLines.map((line, idx) => {
-                      if (line.type === 'removed') return null; // hide removed lines on new side
+                      if (line.type === 'removed') return null;
                       return (
                         <span 
                           key={idx} 
@@ -822,8 +943,6 @@ Testing output streaming complete. Let me know if you would like to commit this 
           </div>
         </main>
       )}
-
-      {/* 4. Modals Overlays */}
 
       {/* Create Collection Modal */}
       {isColModalOpen && (

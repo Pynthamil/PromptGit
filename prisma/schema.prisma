@@ -1,0 +1,79 @@
+datasource db {
+  provider = "sqlite"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Workspace {
+  id          String       @id @default(uuid())
+  name        String
+  createdAt   DateTime     @default(now())
+  collections Collection[]
+  apiKeys     ApiKey[]
+}
+
+model Collection {
+  id          String   @id @default(uuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  name        String
+  description String
+  isPublic    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  prompts     Prompt[]
+}
+
+model Prompt {
+  id           String     @id @default(uuid())
+  collectionId String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String
+  forkedFromId String?
+  isPublic     Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  commits      Commit[]
+  tags         Tag[]
+}
+
+model Commit {
+  id             String    @id @default(uuid())
+  promptId       String
+  prompt         Prompt    @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  parentCommitId String?
+  authorName     String
+  commitHash     String
+  template       String
+  commitMessage  String
+  createdAt      DateTime  @default(now())
+  tags           Tag[]
+
+  // Embedded Model configuration fields for SQLite simplicity
+  provider       String    @default("openai")
+  modelName      String    @default("gpt-4o")
+  temperature    Float     @default(0.7)
+  maxTokens      Int       @default(500)
+  topP           Float     @default(1.0)
+}
+
+model Tag {
+  id        String   @id @default(uuid())
+  promptId  String
+  prompt    Prompt   @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  commitId  String
+  commit    Commit   @relation(fields: [commitId], references: [id], onDelete: Cascade)
+  name      String   // e.g. "production", "staging"
+  updatedAt DateTime @updatedAt
+}
+
+model ApiKey {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  provider     String    // e.g. "openai", "anthropic"
+  encryptedKey String
+  iv           String
+  createdAt    DateTime  @default(now())
+}
